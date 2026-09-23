@@ -40,6 +40,7 @@ from src.llm_client import llm
 from src.bounty_scanner import scan_all
 from src.wallet_monitor import get_status
 from src.git_executor import git_exec, normalize_repo_name
+from src.task_tracker import tracker
 
 console = Console()
 
@@ -244,6 +245,13 @@ Ensure the repository name is in owner/repo format and the code in "files" is 10
                 )
                 ledger_entry = f"| {datetime.now().strftime('%Y-%m-%d')} | github | {pr_title} | {pr_url} | Submitted (Autonomous) |"
                 _append_ledger(ledger_entry)
+                tracker.record_completed_task(
+                    url=target_repo,
+                    title=pr_title,
+                    source="github",
+                    artifact_or_pr=pr_url,
+                    status="submitted",
+                )
                 console.print(f"\n[bold green]🎉 Pull Request submitted autonomously and logged to ledger![/bold green]\n")
                 return
             except Exception as e:
@@ -331,8 +339,17 @@ Write the FULL content now."""
     sub_file = _SUBMISSIONS_DIR / f"{slug}_{ts}.md"
     sub_file.write_text(response, encoding="utf-8")
 
+    sub_url = f"https://superteam.fun/listings/{slug}" if slug_match else str(sub_file)
     ledger_entry = f"| {datetime.now().strftime('%Y-%m-%d')} | superteam | {slug} | file:///{sub_file.as_posix()} | Ready (Autonomous) |"
     _append_ledger(ledger_entry)
+
+    tracker.record_completed_task(
+        url=sub_url,
+        title=slug,
+        source="superteam",
+        artifact_or_pr=str(sub_file),
+        status="ready",
+    )
 
     console.print(f"\n[bold green]💾 Content saved autonomously to:[/bold green] [cyan]{sub_file}[/cyan]")
     console.print(f"[dim]✎ Ledger entry recorded in {_LEDGER_PATH}[/dim]\n")
@@ -401,8 +418,11 @@ Awaiting approval to execute."""
 
 # ─── Main entry points ────────────────────────────────────────────────────────
 
-def run_agent(autonomous: bool = False) -> None:
-    """Run a single cycle of the earning agent."""
+def run_agent(autonomous: bool = False) -> bool:
+    """
+    Run a single cycle of the earning agent.
+    Returns True if an opportunity was found and executed; False otherwise.
+    """
     mode_text = "[bold green]100% Autonomous (Hands-Free)[/bold green]" if autonomous else "[bold yellow]Interactive (Human Approval)[/bold yellow]"
     
     # ── Header
@@ -410,7 +430,8 @@ def run_agent(autonomous: bool = False) -> None:
         f"[bold cyan]🤖 Penniless Agent — Active[/bold cyan]\n"
         f"Mode   : {mode_text}\n"
         f"Agent  : [yellow]{cfg.AGENT_NAME}[/yellow]\n"
-        f"LLM    : [green]{llm.active_summary()}[/green]",
+        f"LLM    : [green]{llm.active_summary()}[/green]\n"
+        f"Tasks Done: [magenta]{tracker.count_submitted()}[/magenta]",
         border_style="cyan",
     ))
 
@@ -431,14 +452,30 @@ def run_agent(autonomous: bool = False) -> None:
             title="No Opportunities",
             border_style="yellow",
         ))
-        return
+        return False
 
-    console.print(f"\n  [bold green]{len(all_opps)}[/bold green] opportunities found across all platforms\n")
-    _show_opportunities_table(all_opps)
+    # Filter out already submitted tasks
+    fresh_opps = tracker.filter_unattempted(all_opps)
+    n_filtered = len(all_opps) - len(fresh_opps)
+    if n_filtered > 0:
+        console.print(f"  [dim]Filtered out {n_filtered} already-attempted tasks[/dim]")
 
-    # ── LLM proposes best task
-    console.print("\n[bold]🧠 Analysing opportunities with AI...[/bold]")
-    proposal = _propose_task(all_opps)
+    if not fresh_opps:
+        console.print(Panel(
+            f"[yellow]All {len(all_opps)} current opportunities have already been completed![/yellow]\n\n"
+            f"• Tasks completed & tracked: [bold green]{tracker.count_submitted()}[/bold green]\n"
+            "• Waiting for new listings or bounties to be published...",
+            title="All Current Bounties Completed",
+            border_style="yellow",
+        ))
+        return False
+
+    console.print(f"\n  [bold green]{len(fresh_opps)}[/bold green] fresh unattempted opportunities ready for work\n")
+    _show_opportunities_table(fresh_opps)
+
+    # ── LLM proposes best task among fresh opportunities
+    console.print("\n[bold]🧠 Analysing fresh opportunities with AI...[/bold]")
+    proposal = _propose_task(fresh_opps)
 
     console.print(Panel(
         Markdown(proposal),
@@ -448,9 +485,9 @@ def run_agent(autonomous: bool = False) -> None:
 
     # ── Autonomous path vs Human Gate
     if autonomous:
-        console.print("\n[bold green]⚡ Autonomous Mode: Auto-approving task and executing without waiting for user input...[/bold green]\n")
+        console.print("\n[bold green]⚡ Autonomous Mode: Auto-executing and submitting without user interaction...[/bold green]\n")
         _execute_task(proposal, autonomous=True)
-        return
+        return True
 
     # Interactive path
     console.print(
@@ -464,43 +501,68 @@ def run_agent(autonomous: bool = False) -> None:
         choice = input("Your choice: ").strip().upper()
         if choice == "GO":
             _execute_task(proposal, autonomous=False)
-            break
+            return True
         elif choice == "SKIP":
             console.print("[dim]Skipping. Re-running scan...[/dim]\n")
-            run_agent(autonomous=False)
-            break
+            return run_agent(autonomous=False)
         elif choice == "QUIT":
             console.print("[dim]Returning to menu.[/dim]")
-            break
+            return False
         else:
             console.print("[dim]Type GO, SKIP, or QUIT[/dim]")
 
 
 def run_autonomous_daemon(interval_minutes: int = 15) -> None:
-    """Continuously run the agent hands-free on a recurring schedule."""
+    """
+    Relentlessly loop through bounties, solve them, and submit work
+    non-stop until earnings appear in the wallet.
+    """
     import time
 
-    cycle = 0
+    task_count = 0
     console.clear()
     console.print(Panel(
-        f"[bold green]🚀 Autonomous Penniless Daemon Running[/bold green]\n\n"
-        f"• Interval: Every [cyan]{interval_minutes} minutes[/cyan]\n"
-        f"• Flow: Scan ➔ AI Selection ➔ Auto-Code/PR/Content ➔ Auto-Ledger\n"
+        f"[bold green]🚀 Relentless Autonomous Earning Daemon Running[/bold green]\n\n"
+        f"• Goal: Continue working non-stop until earnings arrive in wallet\n"
+        f"• Pipeline: Auto-Discover ➔ Auto-Solve ➔ Auto-Submit PR/Content ➔ Next Task\n"
+        f"• Non-stop: Submits a task, pauses 15s for rate limits, then grabs next task immediately\n"
         f"• Press [bold red]Ctrl + C[/bold red] at any time to stop",
-        title="[bold cyan]Hands-Free Mode Active[/bold cyan]",
+        title="[bold cyan]100% Hands-Free Earning Engine[/bold cyan]",
         border_style="green",
     ))
 
     try:
         while True:
-            cycle += 1
-            console.print(f"\n[bold magenta]═════════════════ CYCLE #{cycle} ═════════════════[/bold magenta]\n")
-            try:
-                run_agent(autonomous=True)
-            except Exception as e:
-                console.print(f"\n[bold red]Error in cycle #{cycle}: {e}[/bold red]")
+            # 1. Check wallet balance
+            status = get_status()
+            current_balance = status.get("total_usd", 0.0)
+            if current_balance > 0.0:
+                console.print(Panel(
+                    f"[bold green]🎉 SUCCESS! EARNING RECEIVED IN WALLET![/bold green]\n\n"
+                    f"• Total Balance: [bold yellow]${current_balance:.4f} USDC[/bold yellow]\n"
+                    f"• Base (EVM): {status.get('base_usdc')} USDC\n"
+                    f"• Solana: {status.get('sol_usdc')} USDC\n"
+                    f"• Total Tasks Completed: {tracker.count_submitted()}",
+                    title="[bold yellow]💰 ON-CHAIN EARNING VERIFIED[/bold yellow]",
+                    border_style="green",
+                ))
 
-            console.print(f"\n[cyan]⏳ Cycle #{cycle} complete. Sleeping for {interval_minutes} minutes... (Ctrl+C to stop)[/cyan]")
-            time.sleep(interval_minutes * 60)
+            task_count += 1
+            console.print(f"\n[bold magenta]═════════════════ WORK CYCLE #{task_count} ═════════════════[/bold magenta]\n")
+            
+            had_work = False
+            try:
+                had_work = run_agent(autonomous=True)
+            except Exception as e:
+                console.print(f"\n[bold red]Work cycle #{task_count} error: {e}[/bold red]")
+
+            if had_work:
+                # Successfully submitted a task! Move immediately to the next available task
+                console.print(f"\n[bold green]✓ Task #{task_count} submitted![/bold green] Advancing to next bounty in [cyan]15 seconds[/cyan]...\n")
+                time.sleep(15)
+            else:
+                # All currently listed opportunities have been submitted, wait for new ones
+                console.print(f"\n[dim]All current bounties completed. Waiting 120s for new listings... (Ctrl+C to stop)[/dim]")
+                time.sleep(120)
     except KeyboardInterrupt:
         console.print("\n\n[bold yellow]⏹ Autonomous daemon stopped by user.[/bold yellow]\n")

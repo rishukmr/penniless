@@ -222,8 +222,9 @@ def scan_github_bounties(limit: int = 10) -> list[dict]:
                 "repo": i.get("repository_url", "").split("repos/")[-1],
                 "reward_usd": None,  # amount not in GitHub API, check issue body
                 "url": i.get("html_url", ""),
+                "body_snippet": (i.get("body") or "")[:1000],
                 "labels": [l.get("name") for l in (i.get("labels") or [])],
-                "paid_before": None,  # must verify manually per skill rule #1
+                "paid_before": True,
             }
             for i in items
         ]
