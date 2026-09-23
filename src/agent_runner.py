@@ -305,6 +305,17 @@ Approved proposal:
         _append_ledger(ledger_match.group(0))
         console.print("[dim]✎ Ledger entry recorded.[/dim]")
 
+    # Record to tracker so autonomous engine always advances to next task
+    url_match = re.search(r"\*\*URL:\*\*\s*([^\s\n]+)", proposal)
+    task_url = url_match.group(1).strip() if url_match else "code_task"
+    tracker.record_completed_task(
+        url=task_url,
+        title="Code Solution",
+        source="github",
+        artifact_or_pr="solution_generated",
+        status="generated",
+    )
+
 
 def _execute_content_task(proposal: str, autonomous: bool = False) -> None:
     """Generate actual written content and save submission artifact."""
@@ -558,8 +569,9 @@ def run_autonomous_daemon(interval_minutes: int = 15) -> None:
 
             if had_work:
                 # Successfully submitted a task! Move immediately to the next available task
-                console.print(f"\n[bold green]✓ Task #{task_count} submitted![/bold green] Advancing to next bounty in [cyan]15 seconds[/cyan]...\n")
-                time.sleep(15)
+                console.print(f"\n[bold green]✓ Task #{task_count} submitted![/bold green] [bold cyan]⚡ Auto-jumping to next bounty in 5s...[/bold cyan]\n")
+                for s in range(5, 0, -1):
+                    time.sleep(1)
             else:
                 # All currently listed opportunities have been submitted, wait for new ones
                 console.print(f"\n[dim]All current bounties completed. Waiting 120s for new listings... (Ctrl+C to stop)[/dim]")

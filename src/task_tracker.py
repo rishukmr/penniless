@@ -47,14 +47,22 @@ class TaskTracker:
     def is_attempted(self, url: str) -> bool:
         if not url:
             return False
-        return self._normalize_url(url) in self.seen_urls
+        norm = self._normalize_url(url)
+        if norm in self.seen_urls:
+            return True
+        if "listings/" in norm:
+            slug = norm.split("listings/")[-1].strip("/")
+            if slug in self.seen_urls:
+                return True
+        return False
 
     def filter_unattempted(self, opps: list[dict]) -> list[dict]:
         """Return only tasks that have not yet been completed or attempted."""
         unattempted = []
         for o in opps:
-            url = o.get("url") or o.get("slug") or ""
-            if not self.is_attempted(url):
+            url = o.get("url") or ""
+            slug = o.get("slug") or ""
+            if not self.is_attempted(url) and not (slug and self.is_attempted(slug)):
                 unattempted.append(o)
         return unattempted
 
@@ -69,6 +77,9 @@ class TaskTracker:
         """Record a completed task so it won't be repeated."""
         norm = self._normalize_url(url)
         self.seen_urls.add(norm)
+        if "listings/" in norm:
+            slug = norm.split("listings/")[-1].strip("/")
+            self.seen_urls.add(slug)
 
         record = {
             "url": url,
