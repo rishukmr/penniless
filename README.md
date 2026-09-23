@@ -186,12 +186,25 @@ EVM_WALLET=0xYourPublicWalletAddress
 ```
 
 ### 4. Run the Agent
+
+#### A. Interactive Menu
 ```bash
 python main.py
 ```
-You will be greeted with the interactive terminal menu:
-- Select **`1`** to run the complete installation and validation wizard.
-- Select **`2`** to start the software: scan live opportunities, review AI proposals, and approve generation with `GO`.
+- Select **`1`** for the complete installation and validation wizard.
+- Select **`2`** to start **100% Autonomous Hands-Free Loop**: scans, selects best bounty, writes code/content, creates GitHub PR via `gh` CLI, saves content, and logs to ledger every 15 minutes without any human intervention.
+- Select **`3`** for a **Single Autonomous Cycle** (one-shot hands-free run).
+- Select **`4`** for **Interactive Mode** (requires manual `GO` confirmation).
+
+#### B. Direct Hands-Free Daemon (Zero Prompts)
+Run completely in the background without menus:
+```bash
+# Continuous autonomous loop (every 15 minutes):
+python main.py --auto
+
+# Or run a single autonomous cycle:
+python main.py --once
+```
 
 ---
 

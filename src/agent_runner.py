@@ -39,6 +39,7 @@ from src.config import cfg
 from src.llm_client import llm
 from src.bounty_scanner import scan_all
 from src.wallet_monitor import get_status
+from src.git_executor import git_exec, normalize_repo_name
 
 console = Console()
 
@@ -46,6 +47,8 @@ console = Console()
 _PROJECT_ROOT = Path(__file__).parent.parent
 _SKILL_PATH = _PROJECT_ROOT / ".claude" / "skills" / "safe-agent-commerce" / "SKILL.md"
 _LEDGER_PATH = _PROJECT_ROOT / "ledger.md"
+_SUBMISSIONS_DIR = _PROJECT_ROOT / "submissions"
+_SUBMISSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -161,10 +164,93 @@ def _is_content_task(proposal: str) -> bool:
     return content_score > code_score
 
 
-def _execute_code_task(proposal: str) -> None:
-    """Generate a full code solution + PR instructions for a code bounty."""
-    console.print("\n[bold green]✅ GO received — generating code solution...[/bold green]\n")
+def _extract_json_payload(text: str) -> dict:
+    """Extract and parse JSON payload from LLM markdown response."""
+    # 1. Search for ```json ... ```
+    m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    # 2. Search for outer curly braces
+    m2 = re.search(r"(\{[\s\S]*\})", text)
+    if m2:
+        try:
+            return json.loads(m2.group(1))
+        except Exception:
+            pass
+    return {}
 
+
+def _execute_code_task(proposal: str, autonomous: bool = False) -> None:
+    """Generate a full code solution and optionally submit PR autonomously."""
+    action_label = "Autonomous Submission" if autonomous else "Manual Review"
+    console.print(f"\n[bold green]✅ Executing code task [{action_label}]...[/bold green]\n")
+
+    if autonomous:
+        # Ask LLM for machine-executable JSON specification
+        exec_json_prompt = f"""You are an autonomous coding agent. Based on this approved task:
+
+{proposal}
+
+Produce a valid JSON object specifying the exact code fix to apply and submit via Pull Request.
+You MUST output ONLY valid JSON inside a ```json``` code fence with these exact keys:
+
+```json
+{{
+  "repo": "owner/repo",
+  "branch": "fix-bounty-patch",
+  "pr_title": "Fix issue with ... (under 72 chars)",
+  "pr_body": "## Summary\\nBrief explanation of problem and fix.\\n\\n## Changes\\nList of changes.\\n\\n## Testing\\nHow to test.\\n\\n*(Generated autonomously by Penniless AI Agent)*",
+  "files": {{
+    "path/to/file.ext": "full modified or new file content here"
+  }}
+}}
+```
+
+Ensure the repository name is in owner/repo format and the code in "files" is 100% complete and working."""
+
+        response = llm.chat(
+            messages=[{"role": "user", "content": exec_json_prompt}],
+            system=_build_system_prompt(),
+            max_tokens=4096,
+        )
+
+        payload = _extract_json_payload(response)
+        target_repo = payload.get("repo", "")
+        branch = payload.get("branch", "fix-bounty-patch")
+        pr_title = payload.get("pr_title", "Fix bounty issue")
+        pr_body = payload.get("pr_body", "Automated fix by Penniless Agent")
+        files = payload.get("files", {})
+
+        if target_repo and files:
+            console.print(Panel(
+                f"[bold cyan]Repo:[/bold cyan] {target_repo}\n"
+                f"[bold cyan]Branch:[/bold cyan] {branch}\n"
+                f"[bold cyan]Title:[/bold cyan] {pr_title}\n"
+                f"[bold cyan]Files to update:[/bold cyan] {list(files.keys())}",
+                title="[bold green]🚀 Autonomous Git & PR Engine[/bold green]",
+                border_style="green",
+            ))
+
+            try:
+                pr_url = git_exec.execute_complete_pr(
+                    target_repo=target_repo,
+                    branch_name=branch,
+                    file_changes=files,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
+                )
+                ledger_entry = f"| {datetime.now().strftime('%Y-%m-%d')} | github | {pr_title} | {pr_url} | Submitted (Autonomous) |"
+                _append_ledger(ledger_entry)
+                console.print(f"\n[bold green]🎉 Pull Request submitted autonomously and logged to ledger![/bold green]\n")
+                return
+            except Exception as e:
+                console.print(f"  [yellow]Autonomous PR submission notice: {e}[/yellow]")
+                console.print("  [dim]Falling back to standard solution display...[/dim]")
+
+    # Standard / Fallback prompt
     execute_prompt = f"""The human approved the task you proposed.
 
 Now produce the full implementation:
@@ -194,11 +280,9 @@ One-line title (imperative mood, <72 chars).
 One-line entry for ledger.md (format: `| DATE | PLATFORM | TASK | PR_URL | Status |`).
 
 ────────────────────────────────────────
-Approved proposal (summary):
+Approved proposal:
 {proposal[:600]}
-────────────────────────────────────────
-
-Produce real, submission-ready output only."""
+────────────────────────────────────────"""
 
     response = llm.chat(
         messages=[{"role": "user", "content": execute_prompt}],
@@ -213,55 +297,23 @@ Produce real, submission-ready output only."""
         _append_ledger(ledger_match.group(0))
         console.print("[dim]✎ Ledger entry recorded.[/dim]")
 
-    console.print("\n[bold]📋 Your next steps:[/bold]")
-    console.print("  1. [yellow]Review every line of the solution above[/yellow] — you are responsible for what you submit")
-    console.print("  2. Test it locally (run tests, lint, build)")
-    console.print("  3. Run the git commands shown → submit PR")
-    console.print(f"  4. Update [cyan]{_LEDGER_PATH}[/cyan] once the PR URL is live")
-    console.print("\n[dim]Reminder: merged PR ≠ money received. Money = on-chain balance in wallet.[/dim]")
 
+def _execute_content_task(proposal: str, autonomous: bool = False) -> None:
+    """Generate actual written content and save submission artifact."""
+    console.print("\n[bold green]✍️ Generating submission-ready content...[/bold green]\n")
 
-def _execute_content_task(proposal: str) -> None:
-    """Generate actual written content for a Superteam content bounty."""
-    console.print("\n[bold green]✅ GO received — writing content...[/bold green]\n")
+    content_prompt = f"""The content bounty has been selected for completion:
 
-    content_prompt = f"""The human approved the content bounty you proposed.
+{proposal}
 
-Now produce the COMPLETE submission-ready content. Be thorough and high quality.
+Now produce the COMPLETE, publication-ready submission:
+- Fully written out (not an outline)
+- High quality and tailored to the bounty
+- If article: full markdown with headings and conclusion
+- If Twitter/X thread: numbered tweets (1/N)
+- If product feedback: numbered specific feedback points
 
-## 1. Bounty Details
-Restate: Platform, URL, Reward, Deadline.
-
-## 2. Full Content (ready to copy-paste and submit)
-
-Write the COMPLETE content piece right now. This must be:
-- Fully written out (not a template or outline)
-- High quality and engaging
-- Tailored to the specific bounty requirements
-- Between 300-1500 words depending on format (article = longer, social post = shorter)
-
-Format as appropriate for the content type:
-- Blog/Article: Full markdown with headings, paragraphs, conclusion
-- Twitter/X Thread: Number each tweet (1/N), max 280 chars each
-- Social Post: Ready to copy-paste caption + hashtags
-- Feedback/Review: Structured points with specific details
-
-## 3. Submission Instructions
-Exact steps:
-1. Go to [URL]
-2. Click Submit
-3. [Any specific fields to fill]
-4. Paste the content above
-
-## 4. Ledger Entry
-`| DATE | superteam | TASK_TITLE | SUBMISSION_URL | Submitted |`
-
-────────────────────────────────────────
-Approved proposal:
-{proposal[:600]}
-────────────────────────────────────────
-
-Write the FULL content now — do not abbreviate or use placeholders."""
+Write the FULL content now."""
 
     response = llm.chat(
         messages=[{"role": "user", "content": content_prompt}],
@@ -271,25 +323,27 @@ Write the FULL content now — do not abbreviate or use placeholders."""
 
     console.print(Panel(Markdown(response), title="[bold green]✍️ Generated Content[/bold green]", border_style="green"))
 
-    ledger_match = re.search(r"\|.*\|.*\|.*\|", response)
-    if ledger_match:
-        _append_ledger(ledger_match.group(0))
-        console.print("[dim]✎ Ledger entry recorded.[/dim]")
+    # Autonomously save artifact to submissions folder
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Extract brief slug from proposal
+    slug_match = re.search(r"listings/([a-zA-Z0-9_\-]+)", proposal)
+    slug = slug_match.group(1)[:30] if slug_match else f"bounty_{ts}"
+    sub_file = _SUBMISSIONS_DIR / f"{slug}_{ts}.md"
+    sub_file.write_text(response, encoding="utf-8")
 
-    console.print("\n[bold]📋 Your next steps:[/bold]")
-    console.print("  1. [yellow]Read the content above carefully[/yellow] — make sure it's accurate")
-    console.print("  2. Go to the Superteam submission URL shown")
-    console.print("  3. Copy-paste the content into the submission form")
-    console.print("  4. Submit and note the submission URL for your ledger")
-    console.print("\n[dim]Reminder: submission ≠ money received. Money = judges approve + on-chain payment.[/dim]")
+    ledger_entry = f"| {datetime.now().strftime('%Y-%m-%d')} | superteam | {slug} | file:///{sub_file.as_posix()} | Ready (Autonomous) |"
+    _append_ledger(ledger_entry)
+
+    console.print(f"\n[bold green]💾 Content saved autonomously to:[/bold green] [cyan]{sub_file}[/cyan]")
+    console.print(f"[dim]✎ Ledger entry recorded in {_LEDGER_PATH}[/dim]\n")
 
 
-def _execute_task(proposal: str) -> None:
+def _execute_task(proposal: str, autonomous: bool = False) -> None:
     """Route to code or content executor based on proposal type."""
     if _is_content_task(proposal):
-        _execute_content_task(proposal)
+        _execute_content_task(proposal, autonomous=autonomous)
     else:
-        _execute_code_task(proposal)
+        _execute_code_task(proposal, autonomous=autonomous)
 
 
 # ─── Phase 1: Find and propose a task ────────────────────────────────────────
@@ -336,7 +390,7 @@ For your chosen task, respond with this exact structure:
 <Low / Medium / High> — <one sentence why>
 
 ---
-Awaiting your GO to proceed. I will NOT start work until you say GO."""
+Awaiting approval to execute."""
 
     return llm.chat(
         messages=[{"role": "user", "content": find_prompt}],
@@ -345,12 +399,16 @@ Awaiting your GO to proceed. I will NOT start work until you say GO."""
     )
 
 
-# ─── Main entry point ─────────────────────────────────────────────────────────
+# ─── Main entry points ────────────────────────────────────────────────────────
 
-def run_agent() -> None:
+def run_agent(autonomous: bool = False) -> None:
+    """Run a single cycle of the earning agent."""
+    mode_text = "[bold green]100% Autonomous (Hands-Free)[/bold green]" if autonomous else "[bold yellow]Interactive (Human Approval)[/bold yellow]"
+    
     # ── Header
     console.print(Panel.fit(
         f"[bold cyan]🤖 Penniless Agent — Active[/bold cyan]\n"
+        f"Mode   : {mode_text}\n"
         f"Agent  : [yellow]{cfg.AGENT_NAME}[/yellow]\n"
         f"LLM    : [green]{llm.active_summary()}[/green]",
         border_style="cyan",
@@ -368,9 +426,8 @@ def run_agent() -> None:
     if not all_opps:
         console.print(Panel(
             "[yellow]No open listings found right now.[/yellow]\n\n"
-            "• Superteam listings are time-limited — check back in 30 minutes\n"
-            "• IssueHunt / Algora listings may be temporarily unavailable\n"
-            "• Tip: run again later or check [link=https://superteam.fun/earn]superteam.fun/earn[/link]",
+            "• Superteam listings are time-limited — check back in 15-30 minutes\n"
+            "• Tip: check https://superteam.fun/earn",
             title="No Opportunities",
             border_style="yellow",
         ))
@@ -385,13 +442,19 @@ def run_agent() -> None:
 
     console.print(Panel(
         Markdown(proposal),
-        title="[bold cyan]🤖 Agent Proposal[/bold cyan]",
+        title="[bold cyan]🤖 Selected Task Proposal[/bold cyan]",
         border_style="cyan",
     ))
 
-    # ── Human approval gate
+    # ── Autonomous path vs Human Gate
+    if autonomous:
+        console.print("\n[bold green]⚡ Autonomous Mode: Auto-approving task and executing without waiting for user input...[/bold green]\n")
+        _execute_task(proposal, autonomous=True)
+        return
+
+    # Interactive path
     console.print(
-        "\n[bold yellow]⚡ Skill Rule #1: human approval required before any work.[/bold yellow]\n"
+        "\n[bold yellow]⚡ Human Approval Gate:[/bold yellow]\n"
         "  [bold green]GO[/bold green]   — approve this task, generate the full solution\n"
         "  [bold blue]SKIP[/bold blue] — find a different task\n"
         "  [bold red]QUIT[/bold red] — return to main menu\n"
@@ -400,14 +463,44 @@ def run_agent() -> None:
     while True:
         choice = input("Your choice: ").strip().upper()
         if choice == "GO":
-            _execute_task(proposal)
+            _execute_task(proposal, autonomous=False)
             break
         elif choice == "SKIP":
             console.print("[dim]Skipping. Re-running scan...[/dim]\n")
-            run_agent()  # recurse once
+            run_agent(autonomous=False)
             break
         elif choice == "QUIT":
             console.print("[dim]Returning to menu.[/dim]")
             break
         else:
             console.print("[dim]Type GO, SKIP, or QUIT[/dim]")
+
+
+def run_autonomous_daemon(interval_minutes: int = 15) -> None:
+    """Continuously run the agent hands-free on a recurring schedule."""
+    import time
+
+    cycle = 0
+    console.clear()
+    console.print(Panel(
+        f"[bold green]🚀 Autonomous Penniless Daemon Running[/bold green]\n\n"
+        f"• Interval: Every [cyan]{interval_minutes} minutes[/cyan]\n"
+        f"• Flow: Scan ➔ AI Selection ➔ Auto-Code/PR/Content ➔ Auto-Ledger\n"
+        f"• Press [bold red]Ctrl + C[/bold red] at any time to stop",
+        title="[bold cyan]Hands-Free Mode Active[/bold cyan]",
+        border_style="green",
+    ))
+
+    try:
+        while True:
+            cycle += 1
+            console.print(f"\n[bold magenta]═════════════════ CYCLE #{cycle} ═════════════════[/bold magenta]\n")
+            try:
+                run_agent(autonomous=True)
+            except Exception as e:
+                console.print(f"\n[bold red]Error in cycle #{cycle}: {e}[/bold red]")
+
+            console.print(f"\n[cyan]⏳ Cycle #{cycle} complete. Sleeping for {interval_minutes} minutes... (Ctrl+C to stop)[/cyan]")
+            time.sleep(interval_minutes * 60)
+    except KeyboardInterrupt:
+        console.print("\n\n[bold yellow]⏹ Autonomous daemon stopped by user.[/bold yellow]\n")

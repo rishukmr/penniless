@@ -50,15 +50,20 @@ _BANNER = r"""
 """
 
 _MENU = """
-  [bold white]1.[/bold white]  [cyan]Complete Installation[/cyan]
-     [dim]Set up everything: Python deps, wallet, Superteam,
-     LLM providers, Claude Code skill, agent.mjs config[/dim]
+  [bold white]1.[/bold white]  [cyan]Complete Installation / Re-configure[/cyan]
+     [dim]Verify prerequisites, wallets, LLMs, and API connections[/dim]
 
-  [bold white]2.[/bold white]  [green]Run the Software[/green]
-     [dim]Start the AI agent — scan Superteam, IssueHunt, Algora
-     and GitHub for bounties, propose a task, and implement it[/dim]
+  [bold white]2.[/bold white]  [bold green]Run Autonomous Agent (100% Hands-Free Loop)[/bold green]
+     [dim]Continuous autonomous loop: auto-scans, auto-selects, auto-fixes,
+     auto-submits PR via GitHub CLI, auto-saves content, and auto-logs to ledger[/dim]
 
-  [bold white]3.[/bold white]  [red]Exit[/red]
+  [bold white]3.[/bold white]  [green]Run Single Cycle (Autonomous)[/green]
+     [dim]One-shot hands-free run: discovers, executes, and submits without asking[/dim]
+
+  [bold white]4.[/bold white]  [yellow]Run Interactive Mode (With Approval Gate)[/yellow]
+     [dim]Step-by-step mode requiring manual 'GO' confirmation before execution[/dim]
+
+  [bold white]5.[/bold white]  [red]Exit[/red]
 """
 
 
@@ -107,9 +112,9 @@ def _show_menu() -> str:
 
     while True:
         choice = input("  > ").strip()
-        if choice in ("1", "2", "3"):
+        if choice in ("1", "2", "3", "4", "5"):
             return choice
-        console.print("  [dim]Please enter 1, 2, or 3[/dim]")
+        console.print("  [dim]Please enter 1, 2, 3, 4, or 5[/dim]")
 
 
 # ─── Option handlers ──────────────────────────────────────────────────────────
@@ -120,7 +125,8 @@ def _run_installation() -> None:
     input("\n  Press Enter to return to the menu...")
 
 
-def _run_software() -> None:
+def _bootstrap_environment() -> bool:
+    """Validate environment and initialize LLM client."""
     env_path = Path(__file__).parent / ".env"
     if not env_path.exists():
         console.print(Panel(
@@ -129,9 +135,8 @@ def _run_software() -> None:
             border_style="red",
         ))
         input("\n  Press Enter to return to the menu...")
-        return
+        return False
 
-    # Reload config from the .env that's on disk right now
     from src.config import cfg
     cfg.reload()
 
@@ -144,20 +149,42 @@ def _run_software() -> None:
             border_style="red",
         ))
         input("\n  Press Enter to return to the menu...")
-        return
+        return False
 
-    # Refresh the LLM client with current config
     from src.llm_client import llm
     llm._refresh()
+    return True
 
+
+def _run_autonomous_loop() -> None:
+    if not _bootstrap_environment():
+        return
+    from src.agent_runner import run_autonomous_daemon
+    run_autonomous_daemon(interval_minutes=15)
+
+
+def _run_single_autonomous() -> None:
+    if not _bootstrap_environment():
+        return
     from src.agent_runner import run_agent
     try:
-        run_agent()
+        run_agent(autonomous=True)
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
     except Exception as e:
         console.print(f"\n[bold red]Error: {e}[/bold red]")
-        console.print("[dim]Check your .env and API keys, then try again.[/dim]")
+
+
+def _run_interactive() -> None:
+    if not _bootstrap_environment():
+        return
+    from src.agent_runner import run_agent
+    try:
+        run_agent(autonomous=False)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+    except Exception as e:
+        console.print(f"\n[bold red]Error: {e}[/bold red]")
 
     input("\n  Press Enter to return to the menu...")
 
@@ -165,17 +192,32 @@ def _run_software() -> None:
 # ─── Main loop ────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # Support direct CLI invocation for autonomous run
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        if arg in ("--auto", "--daemon", "-a"):
+            _run_autonomous_loop()
+            return
+        elif arg in ("--once", "-1"):
+            _run_single_autonomous()
+            return
+
     while True:
         choice = _show_menu()
 
         if choice == "1":
             _run_installation()
         elif choice == "2":
-            _run_software()
+            _run_autonomous_loop()
         elif choice == "3":
+            _run_single_autonomous()
+        elif choice == "4":
+            _run_interactive()
+        elif choice == "5":
             console.print("\n  [dim]Goodbye.[/dim]\n")
             sys.exit(0)
 
 
 if __name__ == "__main__":
     main()
+
